@@ -20,8 +20,8 @@ interface GameSession {
   started_at: string | null;
 }
 
-const HEARTBEAT_INTERVAL = 3000; // 3 seconds
-const INACTIVE_THRESHOLD = 30000; // 30 seconds - more forgiving
+const HEARTBEAT_INTERVAL = 3000; // 3 วินาที
+const INACTIVE_THRESHOLD = 30000; // 30 วินาที - เกณฑ์คนหลุด
 
 export const useGameSession = () => {
   const [session, setSession] = useState<GameSession | null>(null);
@@ -32,7 +32,7 @@ export const useGameSession = () => {
   const [hasJoined, setHasJoined] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Generate a unique player ID for this browser session
+  // สร้างหรือดึง Player ID จากเครื่องผู้เล่น
   const getPlayerId = useCallback(() => {
     let playerId = localStorage.getItem('werewolf_player_id');
     if (!playerId) {
@@ -42,11 +42,10 @@ export const useGameSession = () => {
     return playerId;
   }, []);
 
-  // Check if player already joined
+  // ตรวจสอบว่าเคยเข้าห้องอยู่แล้วหรือไม่
   const checkExistingPlayer = useCallback(async () => {
     const playerId = getPlayerId();
     
-    // Check if player exists in any active session
     const { data: existingPlayer } = await supabase
       .from('players')
       .select('*, game_sessions!inner(*)')
@@ -59,13 +58,11 @@ export const useGameSession = () => {
       setSession(existingPlayer.game_sessions as GameSession);
       setHasJoined(true);
 
-      // Update last_seen
       await supabase
         .from('players')
         .update({ last_seen: new Date().toISOString() })
         .eq('id', playerId);
 
-      // Fetch all players
       const { data: allPlayers } = await supabase
         .from('players')
         .select('*')
@@ -76,13 +73,12 @@ export const useGameSession = () => {
     }
   }, [getPlayerId]);
 
-  // Join game with name
+  // เข้าร่วมเกม
   const joinGame = useCallback(async (playerName: string) => {
     try {
       setIsJoining(true);
       const playerId = getPlayerId();
 
-      // Find or create an active lobby session
       let { data: existingSession } = await supabase
         .from('game_sessions')
         .select('*')
@@ -92,7 +88,6 @@ export const useGameSession = () => {
         .maybeSingle();
 
       if (!existingSession) {
-        // Create new session
         const { data: newSession, error: createError } = await supabase
           .from('game_sessions')
           .insert({ status: 'lobby' })
@@ -105,7 +100,6 @@ export const useGameSession = () => {
 
       setSession(existingSession as GameSession);
 
-      // Get current player count for ordering
       const { count } = await supabase
         .from('players')
         .select('*', { count: 'exact', head: true })
@@ -113,7 +107,6 @@ export const useGameSession = () => {
 
       const playerOrder = (count || 0) + 1;
 
-      // Create new player
       const { data: newPlayer, error: playerError } = await supabase
         .from('players')
         .insert({
@@ -131,7 +124,6 @@ export const useGameSession = () => {
       setCurrentPlayer(newPlayer as Player);
       setHasJoined(true);
 
-      // Fetch all players
       const { data: allPlayers } = await supabase
         .from('players')
         .select('*')
@@ -141,55 +133,50 @@ export const useGameSession = () => {
       setPlayers((allPlayers || []) as Player[]);
       setIsJoining(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'เกิดข้อผิดพลาด');
+      setError(err instanceof Error ? err.message : 'เกิดข้อผิดพลาดในการเข้าร่วม');
       setIsJoining(false);
     }
   }, [getPlayerId]);
 
-  // Check on mount
   useEffect(() => {
     checkExistingPlayer();
   }, [checkExistingPlayer]);
 
-  // Toggle ready status
+  // เปลี่ยนสถานะ Ready
   const toggleReady = useCallback(async () => {
     if (!currentPlayer) return;
-
     const newReadyState = !currentPlayer.is_ready;
-    
     const { error } = await supabase
       .from('players')
       .update({ is_ready: newReadyState })
       .eq('id', currentPlayer.id);
-
     if (!error) {
       setCurrentPlayer(prev => prev ? { ...prev, is_ready: newReadyState } : null);
       soundManager.playReady();
     }
   }, [currentPlayer]);
 
-  // Vote to start
+  // โหวตเพื่อเริ่มเกม
   const voteToStart = useCallback(async () => {
     if (!currentPlayer) return;
-
     const { error } = await supabase
       .from('players')
       .update({ voted_to_start: true })
       .eq('id', currentPlayer.id);
-
     if (!error) {
       setCurrentPlayer(prev => prev ? { ...prev, voted_to_start: true } : null);
       soundManager.playVote();
     }
   }, [currentPlayer]);
 
-  // Start game
+  // ฟังก์ชันสุ่มบทบาทและเริ่มเกม
   const startGame = useCallback(async () => {
     if (!session || !players.length) return;
 
+    // สุ่มบทบาท
     const roles = assignRoles(players.length);
     
-    // Assign roles to each player
+    // อัปเดตบทบาทให้ผู้เล่นแต่ละคน
     const updates = players.map((player, index) => ({
       id: player.id,
       assigned_role: roles[index] || 'beggar',
@@ -202,7 +189,7 @@ export const useGameSession = () => {
         .eq('id', update.id);
     }
 
-    // Update session status
+    // เปลี่ยนสถานะห้องเป็น playing
     await supabase
       .from('game_sessions')
       .update({ status: 'playing', started_at: new Date().toISOString() })
@@ -211,11 +198,9 @@ export const useGameSession = () => {
     soundManager.playGameStart();
   }, [session, players]);
 
-  // Reset game
+  // รีเซ็ตเกมเพื่อเล่นรอบใหม่
   const resetGame = useCallback(async () => {
     if (!session) return;
-
-    // Reset all players
     await supabase
       .from('players')
       .update({ 
@@ -225,63 +210,43 @@ export const useGameSession = () => {
       })
       .eq('session_id', session.id);
 
-    // Reset session
     await supabase
       .from('game_sessions')
       .update({ status: 'lobby', started_at: null })
       .eq('id', session.id);
   }, [session]);
 
-  // Heartbeat - update last_seen
+  // ส่งสัญญาณชีพ (Heartbeat)
   useEffect(() => {
     if (!currentPlayer) return;
-
     const interval = setInterval(async () => {
       await supabase
         .from('players')
         .update({ last_seen: new Date().toISOString() })
         .eq('id', currentPlayer.id);
     }, HEARTBEAT_INTERVAL);
-
     return () => clearInterval(interval);
   }, [currentPlayer]);
 
-  // Real-time subscriptions
+  // สมัครรับข้อมูล Real-time
   useEffect(() => {
     if (!session) return;
 
-    // Subscribe to session changes
     const sessionChannel = supabase
-      .channel('session-changes')
+      .channel(`session-${session.id}`)
       .on(
         'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'game_sessions',
-          filter: `id=eq.${session.id}`,
-        },
-        (payload) => {
-          if (payload.eventType === 'UPDATE') {
-            setSession(payload.new as GameSession);
-          }
-        }
+        { event: 'UPDATE', schema: 'public', table: 'game_sessions', filter: `id=eq.${session.id}` },
+        (payload) => setSession(payload.new as GameSession)
       )
       .subscribe();
 
-    // Subscribe to player changes
     const playersChannel = supabase
-      .channel('player-changes')
+      .channel(`players-${session.id}`)
       .on(
         'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'players',
-          filter: `session_id=eq.${session.id}`,
-        },
+        { event: '*', schema: 'public', table: 'players', filter: `session_id=eq.${session.id}` },
         async (payload) => {
-          // Refresh players list
           const { data: allPlayers } = await supabase
             .from('players')
             .select('*')
@@ -295,7 +260,6 @@ export const useGameSession = () => {
 
           setPlayers(activePlayers as Player[]);
 
-          // Update current player if needed
           if (payload.eventType === 'UPDATE' && payload.new.id === currentPlayer?.id) {
             setCurrentPlayer(payload.new as Player);
           }
@@ -309,32 +273,38 @@ export const useGameSession = () => {
     };
   }, [session, currentPlayer?.id]);
 
-
-  // Cleanup on unmount
-  useEffect(() => {
-    const handleUnload = async () => {
-      if (currentPlayer) {
-        await supabase
-          .from('players')
-          .delete()
-          .eq('id', currentPlayer.id);
-      }
-    };
-
-    window.addEventListener('beforeunload', handleUnload);
-    return () => window.removeEventListener('beforeunload', handleUnload);
-  }, [currentPlayer]);
-
+  // การคำนวณสถานะต่างๆ ใน Lobby
   const activePlayers = players.filter(p => {
     const lastSeen = new Date(p.last_seen).getTime();
     return Date.now() - lastSeen < INACTIVE_THRESHOLD;
   });
 
-  const allReady = activePlayers.length > 0 && activePlayers.every(p => p.is_ready);
+  const allReady = activePlayers.length >= 2 && activePlayers.every(p => p.is_ready);
   const voteCount = activePlayers.filter(p => p.voted_to_start).length;
   const voteThreshold = Math.ceil(activePlayers.length * 0.5);
   const canStartWithVote = voteCount >= voteThreshold && activePlayers.length >= 2;
   const allVoted = activePlayers.length >= 2 && activePlayers.every(p => p.voted_to_start);
+
+  // --- ส่วนที่แก้ไข: Auto-start เมื่อโหวตครบ ---
+  useEffect(() => {
+    // ถ้าสถานะเป็น lobby และทุกคนโหวตครบ (หรือถึงเกณฑ์)
+    if (session?.status === 'lobby' && allVoted) {
+      console.log("ทุกคนโหวตแล้ว กำลังเริ่มเกม...");
+      startGame();
+    }
+  }, [allVoted, session?.status, startGame]);
+  // ------------------------------------------
+
+  // ลบชื่อออกจากห้องเมื่อปิด Browser
+  useEffect(() => {
+    const handleUnload = async () => {
+      if (currentPlayer) {
+        await supabase.from('players').delete().eq('id', currentPlayer.id);
+      }
+    };
+    window.addEventListener('beforeunload', handleUnload);
+    return () => window.removeEventListener('beforeunload', handleUnload);
+  }, [currentPlayer]);
 
   return {
     session,
