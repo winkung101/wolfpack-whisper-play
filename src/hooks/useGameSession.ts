@@ -33,7 +33,7 @@ export const useGameSession = () => {
   const [error, setError] = useState<string | null>(null);
   const [countdown, setCountdown] = useState<number | null>(null);
   
-  // ใช้ useRef เพื่อป้องกันการรันฟังก์ชันซ้ำซ้อนในระดับ Logic ของเครื่องนั้นๆ
+  // ป้องกันการรันฟังก์ชันซ้ำซ้อน
   const isStartingRef = useRef(false);
 
   const getPlayerId = useCallback(() => {
@@ -55,7 +55,6 @@ export const useGameSession = () => {
     if (fetchError) return [];
 
     if (data) {
-      // กรองเฉพาะผู้เล่นที่ยังแอคทีฟอยู่ (ส่ง Heartbeat ล่าสุด)
       const activeList = data.filter((p: Player) => {
         const lastSeen = new Date(p.last_seen).getTime();
         return Date.now() - lastSeen < INACTIVE_THRESHOLD;
@@ -90,7 +89,6 @@ export const useGameSession = () => {
       setError(null);
       const playerId = getPlayerId();
 
-      // ลบข้อมูลตัวเองที่อาจตกค้างอยู่เพื่อป้องกัน Error
       await supabase.from('players').delete().eq('id', playerId);
 
       let { data: existingSession } = await supabase
@@ -136,7 +134,7 @@ export const useGameSession = () => {
       setHasJoined(true);
       await fetchAllPlayers(existingSession.id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'ไม่สามารถเข้าร่วมเกมได้');
+      setError(err instanceof Error ? err.message : 'เกิดข้อผิดพลาด');
     } finally {
       setIsJoining(false);
     }
@@ -161,7 +159,7 @@ export const useGameSession = () => {
     soundManager.playVote();
   }, [currentPlayer]);
 
-  // ฟังก์ชันสุ่มบทบาทและเริ่มเกม (Atomic Transaction)
+  // ฟังก์ชันเริ่มเกม (เฉพาะ Host/Leader เป็นคนเรียก)
   const startGame = useCallback(async () => {
     if (!session || players.length < 2 || isStartingRef.current) return;
     
@@ -169,39 +167,40 @@ export const useGameSession = () => {
     setIsLoading(true);
 
     try {
-      // 1. ดึงข้อมูลล่าสุดเพื่อให้มั่นใจว่าไม่มีใครหลุดไปขณะนับถอยหลัง
+      // 1. ดึงข้อมูลล่าสุดเพื่อให้มั่นใจว่าทุกคนอยู่ในลิสต์
       const { data: freshPlayers } = await supabase
         .from('players')
         .select('*')
         .eq('session_id', session.id)
         .order('player_order', { ascending: true });
 
-      if (!freshPlayers || freshPlayers.length < 2) throw new Error("จำนวนผู้เล่นไม่เพียงพอ");
+      if (!freshPlayers || freshPlayers.length < 2) throw new Error("ผู้เล่นไม่ครบ");
 
+      // 2. สุ่มบทบาท
       const roles = assignRoles(freshPlayers.length);
       
-      // 2. อัปเดตบทบาททุกคนลง DB (Parallel)
+      // 3. อัปเดตบทบาททุกคน (Parallel)
       await Promise.all(freshPlayers.map((p, i) => 
         supabase.from('players').update({ assigned_role: roles[i] }).eq('id', p.id)
       ));
 
-      // 3. เปลี่ยนสถานะห้อง (The Atomic Lock)
+      // 4. เปลี่ยนสถานะห้องเป็นขั้นตอนสุดท้าย (The Lock)
       const startTime = new Date().toISOString();
       const { error: sessionError } = await supabase
         .from('game_sessions')
         .update({ status: 'playing', started_at: startTime })
         .eq('id', session.id)
-        .eq('status', 'lobby'); // สำคัญ: จะสำเร็จแค่เครื่องเดียวที่รันถึงจุดนี้ก่อน
+        .eq('status', 'lobby'); // atomic check
 
       if (sessionError) throw sessionError;
 
-      // 4. Optimistic Update ในเครื่องตัวเองทันทีเพื่อให้ UI เปลี่ยนหน้าทันที
+      // 5. บังคับเปลี่ยน State ในเครื่อง Host ทันที
       setSession(prev => prev ? { ...prev, status: 'playing', started_at: startTime } : null);
       soundManager.playGameStart();
       
     } catch (err) {
-      console.error("Game Start Error:", err);
-      isStartingRef.current = false; // ปลดล็อกเพื่อให้โหวตเริ่มใหม่ได้หากเฟล
+      console.error("Game Start Sequence Error:", err);
+      isStartingRef.current = false;
     } finally {
       setIsLoading(false);
     }
@@ -238,31 +237,33 @@ export const useGameSession = () => {
 
   const allVoted = players.length >= 2 && players.every(p => p.voted_to_start);
 
-  // --- ระบบนับถอยหลังและการทำงานแบบจ่าฝูง ---
+  // ระบบนับถอยหลังและการเริ่มเกมแบบ Leader-Follower
   useEffect(() => {
-    let timer: NodeJS.Timeout;
-
-    if (session?.status === 'lobby' && allVoted) {
-      if (countdown === null) {
-        setCountdown(5); // เริ่มนับถอยหลัง
-      } else if (countdown > 0) {
-        timer = setTimeout(() => setCountdown(countdown - 1), 1000);
-      } else if (countdown === 0) {
-        // เมื่อถึง 0: หาคนที่เป็น Host (คนแรกในรายการที่เรียงตาม player_order)
-        const host = players.reduce((prev, curr) => (prev.player_order < curr.player_order) ? prev : curr, players[0]);
-        
-        // ถ้าเราคือ Host ให้รันฟังก์ชันเริ่มเกม
-        if (host?.id === currentPlayer?.id && !isStartingRef.current && !isLoading) {
-          startGame();
-        }
-      }
-    } else {
-      // รีเซ็ตหากเงื่อนไขไม่ครบ (เช่น มีคนยกเลิกโหวต)
+    if (session?.status !== 'lobby' || !allVoted) {
       if (countdown !== null) setCountdown(null);
+      return;
     }
 
+    if (countdown === null) {
+      setCountdown(5); // เริ่มนับจาก 5
+      return;
+    }
+
+    if (countdown === 0) {
+      // หา Host (คนแรกในลิสต์ตาม player_order)
+      const host = players.reduce((prev, curr) => (prev.player_order < curr.player_order) ? prev : curr, players[0]);
+      if (host?.id === currentPlayer?.id && !isStartingRef.current && !isLoading) {
+        startGame();
+      }
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      setCountdown(c => (c !== null && c > 0 ? c - 1 : c));
+    }, 1000);
+
     return () => clearTimeout(timer);
-  }, [allVoted, session?.status, countdown, players, currentPlayer?.id, startGame, isLoading]);
+  }, [allVoted, session?.status, countdown, currentPlayer?.id, players, isLoading, startGame]);
 
   return {
     session, players, currentPlayer, isLoading, isJoining, hasJoined, error, countdown,

@@ -17,7 +17,8 @@ export const Lobby = () => {
     voteThreshold,
     canStartWithVote,
     isJoining,
-    countdown
+    countdown,
+    isLoading
   } = useGameSession();
 
   const handleToggleReady = () => {
@@ -50,98 +51,100 @@ export const Lobby = () => {
             animate={{ opacity: 1, y: 0 }}
             className="text-4xl md:text-5xl font-bold text-foreground tracking-tight"
           >
-            Lobby
+            Werewolf Lobby
           </motion.h1>
-          <p className="text-muted-foreground">รอผู้เล่นคนอื่นๆ เตรียมพร้อมเพื่อเริ่มเกม</p>
+          <p className="text-muted-foreground">รอผู้เล่นให้พร้อม แล้วโหวตเพื่อสุ่มบทบาท</p>
         </header>
 
-        {/* Countdown Overlay */}
+        {/* Countdown Overlay - ปรากฏเมื่อทุกคนโหวตครบ */}
         <AnimatePresence>
           {countdown !== null && (
             <motion.div
-              initial={{ opacity: 0, scale: 0.5 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.5 }}
-              className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-50 flex items-center justify-center bg-background/90 backdrop-blur-md"
             >
-              <div className="text-center space-y-4 glass-card p-12 rounded-full w-64 h-64 flex flex-col items-center justify-center border-primary/50 shadow-2xl shadow-primary/20">
-                <span className="text-sm uppercase tracking-widest text-primary font-bold">เริ่มเกมใน</span>
-                <motion.span 
-                  key={countdown}
-                  initial={{ scale: 1.5, opacity: 0 }}
-                  animate={{ scale: 1, opacity: 1 }}
-                  className="text-8xl font-black text-primary"
+              <div className="text-center space-y-6">
+                <motion.div
+                  initial={{ scale: 0.5, rotate: -10 }}
+                  animate={{ scale: 1, rotate: 0 }}
+                  className="glass-card p-12 rounded-full w-72 h-72 flex flex-col items-center justify-center border-primary shadow-2xl shadow-primary/20"
                 >
-                  {countdown}
-                </motion.span>
+                  <span className="text-sm uppercase tracking-[0.3em] text-primary font-bold mb-2">สุ่มบทบาทใน</span>
+                  <motion.span 
+                    key={countdown}
+                    initial={{ scale: 2, opacity: 0 }}
+                    animate={{ scale: 1, opacity: 1 }}
+                    className="text-9xl font-black text-primary leading-none"
+                  >
+                    {countdown}
+                  </motion.span>
+                </motion.div>
+                <p className="text-muted-foreground animate-pulse tracking-wide">
+                  {isLoading ? "กำลังประมวลผลบทบาท..." : "เตรียมตัวให้พร้อม!"}
+                </p>
               </div>
             </motion.div>
           )}
         </AnimatePresence>
 
-        {/* Stats */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <motion.div 
-            initial={{ opacity: 0, x: -20 }}
-            animate={{ opacity: 1, x: 0 }}
-            className="glass-card p-4 rounded-2xl flex items-center gap-4"
-          >
+        {/* Stats Grid */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="glass-card p-4 rounded-2xl flex items-center gap-4 border-white/5">
             <div className="bg-primary/10 p-3 rounded-xl">
               <Users className="text-primary" />
             </div>
             <div>
-              <p className="text-sm text-muted-foreground font-medium">ผู้เล่นในห้อง</p>
-              <p className="text-2xl font-bold">{players.length} คน</p>
+              <p className="text-sm text-muted-foreground font-medium">ผู้เล่นออนไลน์</p>
+              <p className="text-2xl font-bold">{players.length}</p>
             </div>
-          </motion.div>
+          </div>
 
-          <motion.div 
-            initial={{ opacity: 0, x: 20 }}
-            animate={{ opacity: 1, x: 0 }}
-            className="glass-card p-4 rounded-2xl flex items-center gap-4"
-          >
+          <div className="glass-card p-4 rounded-2xl flex items-center gap-4 border-white/5">
             <div className={`p-3 rounded-xl ${canStartWithVote ? 'bg-green-500/10' : 'bg-orange-500/10'}`}>
               <CheckCircle2 className={canStartWithVote ? 'text-green-500' : 'text-orange-500'} />
             </div>
             <div>
-              <p className="text-sm text-muted-foreground font-medium">คะแนนโหวตเริ่มเกม</p>
+              <p className="text-sm text-muted-foreground font-medium">โหวตเริ่มเกม</p>
               <p className="text-2xl font-bold">{voteCount} / {voteThreshold}</p>
             </div>
-          </motion.div>
+          </div>
         </div>
 
-        {/* Players Grid */}
+        {/* Player List */}
         <div className="space-y-4">
-          <h2 className="text-xl font-semibold flex items-center gap-2">
-            รายชื่อผู้เล่น
-            {allReady && (
-              <span className="text-xs bg-green-500/20 text-green-500 px-2 py-0.5 rounded-full font-normal">
-                ทุกคนพร้อมแล้ว!
+          <div className="flex items-center justify-between">
+            <h2 className="text-xl font-bold">รายชื่อผู้เล่น</h2>
+            {allVoted && (
+              <span className="flex items-center gap-1.5 text-xs text-primary font-bold animate-pulse">
+                <span className="w-2 h-2 bg-primary rounded-full" />
+                โหวตครบแล้ว!
               </span>
             )}
-          </h2>
+          </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {players.map((player) => (
+            {players.map((p) => (
               <PlayerCard 
-                key={player.id} 
-                player={player} 
-                isMe={player.id === currentPlayer?.id}
+                key={p.id} 
+                player={p} 
+                isMe={p.id === currentPlayer?.id} 
               />
             ))}
           </div>
         </div>
 
-        {/* Action Bar */}
-        <motion.div 
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="sticky bottom-6 glass-card p-6 rounded-3xl border-t shadow-2xl space-y-4"
-        >
-          <div className="flex flex-col sm:flex-row gap-4">
+        {/* Sticky Actions */}
+        <div className="fixed bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-background via-background/90 to-transparent pointer-events-none">
+          <motion.div 
+            initial={{ opacity: 0, y: 50 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="max-w-4xl mx-auto flex flex-col sm:flex-row gap-4 pointer-events-auto"
+          >
             <Button
               onClick={handleToggleReady}
-              variant={currentPlayer?.is_ready ? "outline" : "default"}
-              className="flex-1 h-14 text-lg rounded-2xl transition-all hover:scale-[1.02] active:scale-[0.98]"
+              variant={currentPlayer?.is_ready ? "secondary" : "default"}
+              className="flex-1 h-16 text-lg rounded-2xl font-bold shadow-xl active:scale-95 transition-transform"
             >
               <CheckCircle2 className={`mr-2 ${currentPlayer?.is_ready ? 'text-green-500' : ''}`} />
               {currentPlayer?.is_ready ? 'ยกเลิกเตรียมพร้อม' : 'ฉันพร้อมแล้ว'}
@@ -150,8 +153,7 @@ export const Lobby = () => {
             <Button
               onClick={handleVoteToStart}
               disabled={!currentPlayer?.is_ready || currentPlayer?.voted_to_start || players.length < 2}
-              variant={currentPlayer?.voted_to_start ? "secondary" : "default"}
-              className="flex-1 h-14 text-lg rounded-2xl bg-gradient-to-r from-orange-600 to-red-600 hover:from-orange-700 hover:to-red-700 text-white border-none transition-all hover:scale-[1.02] active:scale-[0.98] disabled:opacity-50"
+              className={`flex-1 h-16 text-lg rounded-2xl font-bold shadow-xl shadow-orange-500/20 active:scale-95 transition-transform bg-gradient-to-br from-orange-600 to-red-600 hover:from-orange-500 hover:to-red-500 text-white border-none`}
             >
               {currentPlayer?.voted_to_start ? (
                 <>
@@ -160,26 +162,21 @@ export const Lobby = () => {
                 </>
               ) : (
                 <>
-                  <Play className="mr-2" />
-                  โหวตเริ่มเกม
+                  <Play className="mr-2 fill-current" />
+                  โหวตเริ่มสุ่มบทบาท
                 </>
               )}
             </Button>
-          </div>
-
+          </motion.div>
           {!currentPlayer?.is_ready && (
-            <p className="text-center text-sm text-orange-500 flex items-center justify-center gap-1">
-              <AlertCircle size={14} />
-              ต้องกด "พร้อมแล้ว" ก่อนจึงจะโหวตเริ่มเกมได้
-            </p>
-          )}
-
-          {countdown !== null && (
-            <p className="text-center text-primary font-bold animate-pulse">
-              เกมกำลังจะเริ่มในอีก {countdown} วินาที...
+            <p className="max-w-4xl mx-auto text-center mt-3 text-xs text-orange-400 font-medium flex items-center justify-center gap-1">
+              <AlertCircle size={12} /> ต้องกด "พร้อมแล้ว" ก่อนจึงจะโหวตเริ่มสุ่มบทบาทได้
             </p>
           )}
         </div>
+        
+        {/* Padding for sticky footer */}
+        <div className="h-32" />
       </div>
     </div>
   );
