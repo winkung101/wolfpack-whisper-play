@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import { assignRoles } from '@/lib/roles';
 import { soundManager } from '@/lib/sounds';
@@ -31,10 +31,6 @@ export const useGameSession = () => {
   const [isJoining, setIsJoining] = useState(false);
   const [hasJoined, setHasJoined] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [countdown, setCountdown] = useState<number | null>(null);
-  
-  // ป้องกันการรันฟังก์ชันซ้ำซ้อน
-  const isStartingRef = useRef(false);
 
   const getPlayerId = useCallback(() => {
     let playerId = localStorage.getItem('werewolf_player_id');
@@ -45,22 +41,20 @@ export const useGameSession = () => {
     return playerId;
   }, []);
 
-  const fetchAllPlayers = useCallback(async (sessionId: string) => {
-    const { data, error: fetchError } = await supabase
+  const fetchPlayers = useCallback(async (sessionId: string) => {
+    const { data } = await supabase
       .from('players')
       .select('*')
       .eq('session_id', sessionId)
       .order('player_order', { ascending: true });
     
-    if (fetchError) return [];
-
     if (data) {
-      const activeList = data.filter((p: Player) => {
+      const active = data.filter(p => {
         const lastSeen = new Date(p.last_seen).getTime();
         return Date.now() - lastSeen < INACTIVE_THRESHOLD;
       });
-      setPlayers(activeList as Player[]);
-      return activeList;
+      setPlayers(active as Player[]);
+      return active;
     }
     return [];
   }, []);
@@ -78,17 +72,15 @@ export const useGameSession = () => {
       setCurrentPlayer(existingPlayer as Player);
       setSession(existingPlayer.game_sessions as GameSession);
       setHasJoined(true);
-      await fetchAllPlayers(existingPlayer.session_id);
+      await fetchPlayers(existingPlayer.session_id);
     }
-  }, [getPlayerId, fetchAllPlayers]);
+  }, [getPlayerId, fetchPlayers]);
 
   const joinGame = useCallback(async (playerName: string) => {
     if (!playerName.trim()) return;
     try {
       setIsJoining(true);
-      setError(null);
       const playerId = getPlayerId();
-
       await supabase.from('players').delete().eq('id', playerId);
 
       let { data: existingSession } = await supabase
@@ -100,15 +92,15 @@ export const useGameSession = () => {
         .maybeSingle();
 
       if (!existingSession) {
-        const { data: newSession, error: createError } = await supabase
+        const { data: newSession } = await supabase
           .from('game_sessions')
           .insert({ status: 'lobby' })
           .select()
           .single();
-        if (createError) throw createError;
         existingSession = newSession;
       }
 
+      if (!existingSession) return;
       setSession(existingSession as GameSession);
 
       const { count } = await supabase
@@ -116,103 +108,78 @@ export const useGameSession = () => {
         .select('*', { count: 'exact', head: true })
         .eq('session_id', existingSession.id);
 
-      const { data: newPlayer, error: playerError } = await supabase
+      const { data: newPlayer, error: pError } = await supabase
         .from('players')
         .insert({
           id: playerId,
           session_id: existingSession.id,
           player_name: playerName.trim(),
           player_order: (count || 0) + 1,
-          is_ready: false,
-          voted_to_start: false,
         })
         .select()
         .single();
 
-      if (playerError) throw playerError;
+      if (pError) throw pError;
       setCurrentPlayer(newPlayer as Player);
       setHasJoined(true);
-      await fetchAllPlayers(existingSession.id);
+      await fetchPlayers(existingSession.id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'เกิดข้อผิดพลาด');
+      setError('ไม่สามารถเข้าห้องได้');
     } finally {
       setIsJoining(false);
     }
-  }, [getPlayerId, fetchAllPlayers]);
+  }, [getPlayerId, fetchPlayers]);
 
-  useEffect(() => {
-    checkExistingPlayer();
-  }, [checkExistingPlayer]);
+  useEffect(() => { checkExistingPlayer(); }, [checkExistingPlayer]);
 
-  const toggleReady = useCallback(async () => {
+  const toggleReady = async () => {
     if (!currentPlayer) return;
-    const newReady = !currentPlayer.is_ready;
-    await supabase.from('players').update({ is_ready: newReady }).eq('id', currentPlayer.id);
-    setCurrentPlayer(prev => prev ? { ...prev, is_ready: newReady } : null);
+    const nextState = !currentPlayer.is_ready;
+    await supabase.from('players').update({ is_ready: nextState }).eq('id', currentPlayer.id);
+    setCurrentPlayer(p => p ? { ...p, is_ready: nextState } : null);
     soundManager.playReady();
-  }, [currentPlayer]);
+  };
 
-  const voteToStart = useCallback(async () => {
+  const voteToStart = async () => {
     if (!currentPlayer) return;
     await supabase.from('players').update({ voted_to_start: true }).eq('id', currentPlayer.id);
-    setCurrentPlayer(prev => prev ? { ...prev, voted_to_start: true } : null);
+    setCurrentPlayer(p => p ? { ...p, voted_to_start: true } : null);
     soundManager.playVote();
-  }, [currentPlayer]);
+  };
 
-  // ฟังก์ชันเริ่มเกม (เฉพาะ Host/Leader เป็นคนเรียก)
+  // ฟังก์ชันสุ่มบทบาทและเริ่มเกมแบบง่าย
   const startGame = useCallback(async () => {
-    if (!session || players.length < 2 || isStartingRef.current) return;
-    
-    isStartingRef.current = true;
+    if (!session || players.length < 2 || isLoading) return;
     setIsLoading(true);
 
     try {
-      // 1. ดึงข้อมูลล่าสุดเพื่อให้มั่นใจว่าทุกคนอยู่ในลิสต์
-      const { data: freshPlayers } = await supabase
-        .from('players')
-        .select('*')
-        .eq('session_id', session.id)
-        .order('player_order', { ascending: true });
-
-      if (!freshPlayers || freshPlayers.length < 2) throw new Error("ผู้เล่นไม่ครบ");
-
-      // 2. สุ่มบทบาท
-      const roles = assignRoles(freshPlayers.length);
+      const roles = assignRoles(players.length);
       
-      // 3. อัปเดตบทบาททุกคน (Parallel)
-      await Promise.all(freshPlayers.map((p, i) => 
+      // อัปเดตบทบาท
+      await Promise.all(players.map((p, i) => 
         supabase.from('players').update({ assigned_role: roles[i] }).eq('id', p.id)
       ));
 
-      // 4. เปลี่ยนสถานะห้องเป็นขั้นตอนสุดท้าย (The Lock)
-      const startTime = new Date().toISOString();
-      const { error: sessionError } = await supabase
+      // เปลี่ยนสถานะห้อง
+      await supabase
         .from('game_sessions')
-        .update({ status: 'playing', started_at: startTime })
+        .update({ status: 'playing', started_at: new Date().toISOString() })
         .eq('id', session.id)
-        .eq('status', 'lobby'); // atomic check
+        .eq('status', 'lobby');
 
-      if (sessionError) throw sessionError;
-
-      // 5. บังคับเปลี่ยน State ในเครื่อง Host ทันที
-      setSession(prev => prev ? { ...prev, status: 'playing', started_at: startTime } : null);
       soundManager.playGameStart();
-      
-    } catch (err) {
-      console.error("Game Start Sequence Error:", err);
-      isStartingRef.current = false;
+    } catch (e) {
+      console.error(e);
     } finally {
       setIsLoading(false);
     }
-  }, [session, players]);
+  }, [session, players, isLoading]);
 
-  const resetGame = useCallback(async () => {
+  const resetGame = async () => {
     if (!session) return;
     await supabase.from('players').update({ is_ready: false, voted_to_start: false, assigned_role: null }).eq('session_id', session.id);
     await supabase.from('game_sessions').update({ status: 'lobby', started_at: null }).eq('id', session.id);
-    isStartingRef.current = false;
-    setCountdown(null);
-  }, [session]);
+  };
 
   useEffect(() => {
     if (!currentPlayer) return;
@@ -225,53 +192,33 @@ export const useGameSession = () => {
   useEffect(() => {
     if (!session) return;
     const channel = supabase.channel(`game-${session.id}`)
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'game_sessions', filter: `id=eq.${session.id}` }, 
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'game_sessions', filter: `id=eq.${session.id}` }, 
         (payload) => setSession(payload.new as GameSession)
       )
       .on('postgres_changes', { event: '*', schema: 'public', table: 'players', filter: `session_id=eq.${session.id}` }, 
-        async () => { await fetchAllPlayers(session.id); }
+        () => { fetchPlayers(session.id); }
       )
       .subscribe();
     return () => { supabase.removeChannel(channel); };
-  }, [session, fetchAllPlayers]);
+  }, [session, fetchPlayers]);
 
   const allVoted = players.length >= 2 && players.every(p => p.voted_to_start);
 
-  // ระบบนับถอยหลังและการเริ่มเกมแบบ Leader-Follower
+  // ตรวจจับเมื่อโหวตครบ ให้เริ่มเกมทันที (เอาคนแรกที่เห็นเป็นคนสั่ง)
   useEffect(() => {
-    if (session?.status !== 'lobby' || !allVoted) {
-      if (countdown !== null) setCountdown(null);
-      return;
+    if (allVoted && session?.status === 'lobby' && players[0]?.id === currentPlayer?.id) {
+      startGame();
     }
-
-    if (countdown === null) {
-      setCountdown(5); // เริ่มนับจาก 5
-      return;
-    }
-
-    if (countdown === 0) {
-      // หา Host (คนแรกในลิสต์ตาม player_order)
-      const host = players.reduce((prev, curr) => (prev.player_order < curr.player_order) ? prev : curr, players[0]);
-      if (host?.id === currentPlayer?.id && !isStartingRef.current && !isLoading) {
-        startGame();
-      }
-      return;
-    }
-
-    const timer = setTimeout(() => {
-      setCountdown(c => (c !== null && c > 0 ? c - 1 : c));
-    }, 1000);
-
-    return () => clearTimeout(timer);
-  }, [allVoted, session?.status, countdown, currentPlayer?.id, players, isLoading, startGame]);
+  }, [allVoted, session?.status, players, currentPlayer?.id, startGame]);
 
   return {
-    session, players, currentPlayer, isLoading, isJoining, hasJoined, error, countdown,
+    session, players, currentPlayer, isLoading, isJoining, hasJoined, error,
     joinGame, toggleReady, voteToStart, startGame, resetGame,
     allReady: players.length >= 2 && players.every(p => p.is_ready),
     allVoted,
     voteCount: players.filter(p => p.voted_to_start).length,
     voteThreshold: Math.ceil(players.length * 0.5),
     canStartWithVote: players.filter(p => p.voted_to_start).length >= Math.ceil(players.length * 0.5) && players.length >= 2,
+    countdown: null // ตัดออกเพื่อความง่ายตามคำขอ
   };
 };
