@@ -20,8 +20,8 @@ interface GameSession {
   started_at: string | null;
 }
 
-const HEARTBEAT_INTERVAL = 5000; // 5 seconds
-const INACTIVE_THRESHOLD = 15000; // 15 seconds
+const HEARTBEAT_INTERVAL = 3000; // 3 seconds
+const INACTIVE_THRESHOLD = 30000; // 30 seconds - more forgiving
 
 export const useGameSession = () => {
   const [session, setSession] = useState<GameSession | null>(null);
