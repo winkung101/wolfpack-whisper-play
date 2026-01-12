@@ -31,6 +31,7 @@ export const useGameSession = () => {
   const [isJoining, setIsJoining] = useState(false);
   const [hasJoined, setHasJoined] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [countdown, setCountdown] = useState<number | null>(null);
   
   const isStartingRef = useRef(false);
 
@@ -91,10 +92,8 @@ export const useGameSession = () => {
       setError(null);
       const playerId = getPlayerId();
 
-      // 1. ลบข้อมูลเก่าที่อาจค้างอยู่ใน DB เพื่อป้องกัน Primary Key Error
       await supabase.from('players').delete().eq('id', playerId);
 
-      // 2. ค้นหาหรือสร้าง Session
       let { data: existingSession } = await supabase
         .from('game_sessions')
         .select('*')
@@ -115,13 +114,11 @@ export const useGameSession = () => {
 
       setSession(existingSession as GameSession);
 
-      // 3. นับจำนวนเพื่อเรียงลำดับ
       const { count } = await supabase
         .from('players')
         .select('*', { count: 'exact', head: true })
         .eq('session_id', existingSession.id);
 
-      // 4. สร้างผู้เล่นใหม่
       const { data: newPlayer, error: playerError } = await supabase
         .from('players')
         .insert({
@@ -218,6 +215,7 @@ export const useGameSession = () => {
     await supabase.from('players').update({ is_ready: false, voted_to_start: false, assigned_role: null }).eq('session_id', session.id);
     await supabase.from('game_sessions').update({ status: 'lobby', started_at: null }).eq('id', session.id);
     isStartingRef.current = false;
+    setCountdown(null);
   }, [session]);
 
   useEffect(() => {
@@ -250,21 +248,54 @@ export const useGameSession = () => {
   const voteThreshold = Math.ceil(players.length * 0.5);
   const canStartWithVote = voteCount >= voteThreshold && players.length >= 2;
 
+  // ระบบนับถอยหลัง 5 วินาที เมื่อโหวตครบ
   useEffect(() => {
-    if (session?.status === 'lobby' && allVoted && players.length >= 2) {
-      const sorted = [...players].sort((a, b) => a.player_order - b.player_order);
-      const isHost = sorted[0]?.id === currentPlayer?.id;
+    let timer: NodeJS.Timeout;
 
-      if (isHost && !isStartingRef.current && !isLoading) {
-        startGame();
+    if (session?.status === 'lobby' && allVoted && players.length >= 2) {
+      if (countdown === null) {
+        // เริ่มต้นนับถอยหลังที่ 5
+        setCountdown(5);
+      } else if (countdown > 0) {
+        // ลดเวลาลงทุก 1 วินาที
+        timer = setTimeout(() => {
+          setCountdown(countdown - 1);
+        }, 1000);
+      } else if (countdown === 0) {
+        // เมื่อถึง 0 ให้ Host สั่งเริ่มเกม
+        const sorted = [...players].sort((a, b) => a.player_order - b.player_order);
+        const isHost = sorted[0]?.id === currentPlayer?.id;
+
+        if (isHost && !isStartingRef.current && !isLoading) {
+          startGame();
+        }
       }
+    } else {
+      // หากเงื่อนไขไม่ครบ (เช่น มีคนออกระหว่างนับ) ให้รีเซ็ต countdown
+      if (countdown !== null) setCountdown(null);
     }
-  }, [allVoted, session?.status, startGame, players, currentPlayer?.id, isLoading]);
+
+    return () => clearTimeout(timer);
+  }, [allVoted, session?.status, countdown, players, currentPlayer?.id, isLoading, startGame]);
 
   return {
-    session, players, currentPlayer, isLoading, isJoining, hasJoined, error,
-    joinGame, toggleReady, voteToStart, startGame, resetGame,
+    session,
+    players,
+    currentPlayer,
+    isLoading,
+    isJoining,
+    hasJoined,
+    error,
+    countdown,
+    joinGame,
+    toggleReady,
+    voteToStart,
+    startGame,
+    resetGame,
     allReady: players.length >= 2 && players.every(p => p.is_ready),
-    allVoted, voteCount, voteThreshold, canStartWithVote,
+    allVoted,
+    voteCount,
+    voteThreshold,
+    canStartWithVote,
   };
 };
