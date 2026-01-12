@@ -32,7 +32,7 @@ export const useGameSession = () => {
   const [hasJoined, setHasJoined] = useState(false);
   const [error, setError] = useState<string | null>(null);
   
-  // ใช้ Ref เพื่อป้องกันการกด Start ซ้ำซ้อนในระดับ Logic
+  // ใช้ useRef เพื่อป้องกันการรันฟังก์ชันซ้ำซ้อนในเครื่องเดียวกัน
   const isStartingRef = useRef(false);
 
   const getPlayerId = useCallback(() => {
@@ -44,13 +44,19 @@ export const useGameSession = () => {
     return playerId;
   }, []);
 
+  // ดึงรายชื่อผู้เล่นและกรองคนที่ไม่แอคทีฟออก
   const fetchAllPlayers = useCallback(async (sessionId: string) => {
-    const { data } = await supabase
+    const { data, error: fetchError } = await supabase
       .from('players')
       .select('*')
       .eq('session_id', sessionId)
       .order('player_order', { ascending: true });
     
+    if (fetchError) {
+      console.error("Error fetching players:", fetchError);
+      return [];
+    }
+
     if (data) {
       const activeList = data.filter((p: Player) => {
         const lastSeen = new Date(p.last_seen).getTime();
@@ -156,34 +162,47 @@ export const useGameSession = () => {
     }
   }, [currentPlayer]);
 
-  // ฟังก์ชันเริ่มเกม (ปรับปรุงให้รองรับ Atomic Update)
+  // ฟังก์ชันเริ่มเกมที่ปลอดภัยที่สุด (ทำงานเฉพาะ Host)
   const startGame = useCallback(async () => {
     if (!session || players.length < 2 || isStartingRef.current) return;
     
-    isStartingRef.current = true; // ล็อคทันที
+    isStartingRef.current = true;
     setIsLoading(true);
 
     try {
-      const roles = assignRoles(players.length);
+      // 1. ดึงข้อมูลล่าสุดเพื่อความแม่นยำ
+      const { data: freshPlayers } = await supabase
+        .from('players')
+        .select('*')
+        .eq('session_id', session.id)
+        .order('player_order', { ascending: true });
+
+      if (!freshPlayers || freshPlayers.length < 2) throw new Error("ผู้เล่นไม่ครบ");
+
+      const roles = assignRoles(freshPlayers.length);
       
-      // 1. อัปเดตบทบาทให้ผู้เล่นทุกคนก่อน
-      const roleUpdates = players.map((p, i) => 
+      // 2. อัปเดตบทบาทแบบขนาน (Parallel)
+      const roleUpdates = freshPlayers.map((p, i) => 
         supabase.from('players').update({ assigned_role: roles[i] }).eq('id', p.id)
       );
       await Promise.all(roleUpdates);
 
-      // 2. เปลี่ยนสถานะห้องเพื่อส่งทุกคนไปหน้า GameScreen
+      // 3. เปลี่ยนสถานะห้อง (Atomic Update)
       const { error: sessionError } = await supabase
         .from('game_sessions')
-        .update({ status: 'playing', started_at: new Date().toISOString() })
-        .eq('id', session.id);
+        .update({ 
+          status: 'playing', 
+          started_at: new Date().toISOString() 
+        })
+        .eq('id', session.id)
+        .eq('status', 'lobby'); // มั่นใจว่าจะสำเร็จแค่เครื่องเดียว
 
       if (sessionError) throw sessionError;
 
       soundManager.playGameStart();
     } catch (err) {
       console.error("Game Start Error:", err);
-      isStartingRef.current = false; // ปลดล็อคถ้าเฟล
+      isStartingRef.current = false;
     } finally {
       setIsLoading(false);
     }
@@ -196,7 +215,7 @@ export const useGameSession = () => {
     isStartingRef.current = false;
   }, [session]);
 
-  // Heartbeat
+  // Heartbeat เพื่อบอกว่าเรายังออนไลน์อยู่
   useEffect(() => {
     if (!currentPlayer) return;
     const interval = setInterval(() => {
@@ -205,7 +224,7 @@ export const useGameSession = () => {
     return () => clearInterval(interval);
   }, [currentPlayer]);
 
-  // Real-time Subscriptions
+  // ระบบ Real-time สำหรับสถานะห้องและรายชื่อผู้เล่น
   useEffect(() => {
     if (!session) return;
 
@@ -214,42 +233,37 @@ export const useGameSession = () => {
         (payload) => setSession(payload.new as GameSession)
       )
       .on('postgres_changes', { event: '*', schema: 'public', table: 'players', filter: `session_id=eq.${session.id}` }, 
-        async (payload) => {
-          const updatedPlayers = await fetchAllPlayers(session.id);
-          if (payload.eventType === 'UPDATE' && payload.new.id === currentPlayer?.id) {
-            setCurrentPlayer(payload.new as Player);
-          }
+        async () => {
+          await fetchAllPlayers(session.id);
         }
       )
       .subscribe();
 
     return () => { supabase.removeChannel(channel); };
-  }, [session, currentPlayer?.id, fetchAllPlayers]);
+  }, [session, fetchAllPlayers]);
 
-  // การคำนวณ Logic ท้ายไฟล์
-  const activePlayers = players; // ใช้ผลลัพธ์จากการ fetch/filter ใน subscription
-  const allVoted = activePlayers.length >= 2 && activePlayers.every(p => p.voted_to_start);
-  const voteCount = activePlayers.filter(p => p.voted_to_start).length;
-  const voteThreshold = Math.ceil(activePlayers.length * 0.5);
-  const canStartWithVote = voteCount >= voteThreshold && activePlayers.length >= 2;
+  const allVoted = players.length >= 2 && players.every(p => p.voted_to_start);
+  const voteCount = players.filter(p => p.voted_to_start).length;
+  const voteThreshold = Math.ceil(players.length * 0.5);
+  const canStartWithVote = voteCount >= voteThreshold && players.length >= 2;
 
-  // --- AUTO-START LOGIC ---
+  // --- ระบบตรวจจับการโหวตเพื่อเริ่มเกมอัตโนมัติ ---
   useEffect(() => {
-    if (session?.status === 'lobby' && allVoted) {
-      // คัดเลือก Host ตัวจริงจากลำดับการเข้าห้อง (player_order น้อยสุดคือ Host)
-      const sortedByOrder = [...activePlayers].sort((a, b) => a.player_order - b.player_order);
-      const isTrueHost = sortedByOrder[0]?.id === currentPlayer?.id;
+    if (session?.status === 'lobby' && allVoted && players.length >= 2) {
+      // คัดเลือกคนที่เป็น Host (คนแรกในลิสต์ที่เรียงลำดับแล้ว)
+      const isHost = players[0]?.id === currentPlayer?.id;
 
-      if (isTrueHost && !isStartingRef.current) {
+      if (isHost && !isStartingRef.current && !isLoading) {
+        console.log("คุณคือหัวห้อง ระบบกำลังเริ่มสุ่มบทบาทให้ทุกคน...");
         startGame();
       }
     }
-  }, [allVoted, session?.status, startGame, activePlayers, currentPlayer?.id]);
+  }, [allVoted, session?.status, startGame, players, currentPlayer?.id, isLoading]);
 
   return {
-    session, players: activePlayers, currentPlayer, isLoading, isJoining, hasJoined, error,
+    session, players, currentPlayer, isLoading, isJoining, hasJoined, error,
     joinGame, toggleReady, voteToStart, startGame, resetGame,
-    allReady: activePlayers.length >= 2 && activePlayers.every(p => p.is_ready),
+    allReady: players.length >= 2 && players.every(p => p.is_ready),
     allVoted, voteCount, voteThreshold, canStartWithVote,
   };
 };
