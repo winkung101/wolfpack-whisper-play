@@ -1,42 +1,49 @@
+import { useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
-import { Users, Play, Vote, RotateCcw } from 'lucide-react';
+import { Users, Vote } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { PlayerCard } from './PlayerCard';
 import { useGameSession } from '@/hooks/useGameSession';
 import { soundManager } from '@/lib/sounds';
 import { cn } from '@/lib/utils';
-
-const TARGET_PLAYERS = 6;
+import { NameEntry } from './NameEntry';
 
 export const Lobby = () => {
   const {
     session,
     players,
     currentPlayer,
-    isLoading,
+    isJoining,
+    hasJoined,
     error,
-    toggleReady,
+    joinGame,
     voteToStart,
     startGame,
-    allReady,
+    allVoted,
     voteCount,
-    voteThreshold,
-    canStartWithVote,
   } = useGameSession();
 
-  if (isLoading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <motion.div
-          initial={{ opacity: 0, scale: 0.9 }}
-          animate={{ opacity: 1, scale: 1 }}
-          className="text-center"
-        >
-          <div className="w-16 h-16 border-4 border-primary/30 border-t-primary rounded-full animate-spin mx-auto mb-4" />
-          <p className="text-muted-foreground">กำลังเชื่อมต่อ...</p>
-        </motion.div>
-      </div>
-    );
+  const hasStartedRef = useRef(false);
+
+  // Auto-start when all players voted
+  useEffect(() => {
+    if (allVoted && !hasStartedRef.current && session?.status === 'lobby') {
+      hasStartedRef.current = true;
+      soundManager.playClick();
+      startGame();
+    }
+  }, [allVoted, session?.status, startGame]);
+
+  // Reset ref when game resets
+  useEffect(() => {
+    if (session?.status === 'lobby') {
+      hasStartedRef.current = false;
+    }
+  }, [session?.status]);
+
+  // Show name entry if not joined
+  if (!hasJoined) {
+    return <NameEntry onSubmit={joinGame} isLoading={isJoining} />;
   }
 
   if (error) {
@@ -56,8 +63,7 @@ export const Lobby = () => {
     );
   }
 
-  const needMorePlayers = players.length < TARGET_PLAYERS;
-  const canStart = (allReady && players.length >= TARGET_PLAYERS) || canStartWithVote;
+  const totalPlayers = players.length;
 
   return (
     <div className="min-h-screen p-4 md:p-8">
@@ -85,29 +91,49 @@ export const Lobby = () => {
             เกมหมาป่า
           </h1>
           <p className="text-muted-foreground">
-            รอผู้เล่นทุกคนพร้อมเพื่อเริ่มเกม
+            โหวตครบทุกคน = เริ่มสุ่มบทบาท!
           </p>
         </motion.div>
 
-        {/* Player Count */}
+        {/* Player Count & Vote Progress */}
         <motion.div
           initial={{ opacity: 0, scale: 0.9 }}
           animate={{ opacity: 1, scale: 1 }}
           transition={{ delay: 0.2 }}
-          className="glass-card rounded-xl p-4 mb-6 flex items-center justify-between"
+          className="glass-card rounded-xl p-4 mb-6"
         >
-          <div className="flex items-center gap-3">
-            <Users className="text-primary" size={24} />
-            <span className="font-medium">ผู้เล่นในห้อง</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <span className={cn(
-              "text-2xl font-bold",
-              players.length >= TARGET_PLAYERS ? "text-green-400" : "text-amber-400"
-            )}>
-              {players.length}
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-3">
+              <Users className="text-primary" size={24} />
+              <span className="font-medium">ผู้เล่นในห้อง</span>
+            </div>
+            <span className="text-2xl font-bold text-primary">
+              {totalPlayers}
             </span>
-            <span className="text-muted-foreground">/ {TARGET_PLAYERS}</span>
+          </div>
+          
+          {/* Vote Progress Bar */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between text-sm">
+              <div className="flex items-center gap-2">
+                <Vote size={16} className="text-amber-400" />
+                <span className="text-muted-foreground">โหวตเริ่มเกม</span>
+              </div>
+              <span className={cn(
+                "font-medium",
+                voteCount === totalPlayers && totalPlayers >= 2 ? "text-green-400" : "text-muted-foreground"
+              )}>
+                {voteCount} / {totalPlayers}
+              </span>
+            </div>
+            <div className="h-2 bg-muted rounded-full overflow-hidden">
+              <motion.div
+                className="h-full bg-gradient-to-r from-amber-500 to-green-500"
+                initial={{ width: 0 }}
+                animate={{ width: totalPlayers > 0 ? `${(voteCount / totalPlayers) * 100}%` : '0%' }}
+                transition={{ duration: 0.3 }}
+              />
+            </div>
           </div>
         </motion.div>
 
@@ -137,92 +163,51 @@ export const Lobby = () => {
           )}
         </div>
 
-        {/* Actions */}
+        {/* Vote Button */}
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.4 }}
-          className="space-y-4"
         >
-          {/* Ready Button */}
           <Button
             onClick={() => {
-              soundManager.playClick();
-              toggleReady();
+              soundManager.playVote();
+              voteToStart();
             }}
+            disabled={currentPlayer?.voted_to_start || totalPlayers < 2}
             className={cn(
               "w-full h-14 text-lg font-semibold transition-all",
-              currentPlayer?.is_ready
+              currentPlayer?.voted_to_start
                 ? "bg-green-600 hover:bg-green-700"
-                : "bg-primary hover:bg-primary/90"
+                : "bg-gradient-to-r from-glow-red via-glow-purple to-glow-blue glow-red"
             )}
             size="lg"
           >
-            {currentPlayer?.is_ready ? '✓ พร้อมแล้ว' : 'พร้อม'}
+            {currentPlayer?.voted_to_start ? (
+              '✓ โหวตแล้ว รอคนอื่น...'
+            ) : totalPlayers < 2 ? (
+              'รออย่างน้อย 2 คน'
+            ) : (
+              <>
+                <Vote className="mr-2" size={20} />
+                โหวตเริ่มเกม
+              </>
+            )}
           </Button>
-
-          {/* Vote to Start (if not enough players) */}
-          {needMorePlayers && players.length >= 2 && (
-            <div className="glass-card rounded-xl p-4">
-              <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center gap-2">
-                  <Vote size={20} className="text-amber-400" />
-                  <span className="font-medium">โหวตเริ่มเกม</span>
-                </div>
-                <span className="text-sm text-muted-foreground">
-                  {voteCount} / {voteThreshold} คะแนน
-                </span>
-              </div>
-              <p className="text-xs text-muted-foreground mb-3">
-                ต้องการ {voteThreshold} เสียงเพื่อเริ่มเกมก่อนครบ {TARGET_PLAYERS} คน
-              </p>
-              <Button
-                onClick={() => {
-                  soundManager.playClick();
-                  voteToStart();
-                }}
-                variant="outline"
-                className="w-full"
-                disabled={currentPlayer?.voted_to_start}
-              >
-                {currentPlayer?.voted_to_start ? '✓ โหวตแล้ว' : 'โหวตเริ่มเกม'}
-              </Button>
-            </div>
-          )}
-
-          {/* Start Game Button */}
-          {canStart && (
-            <motion.div
-              initial={{ opacity: 0, scale: 0.9 }}
-              animate={{ opacity: 1, scale: 1 }}
-            >
-              <Button
-                onClick={() => {
-                  soundManager.playClick();
-                  startGame();
-                }}
-                className="w-full h-14 text-lg font-semibold bg-gradient-to-r from-glow-red via-glow-purple to-glow-blue glow-red"
-                size="lg"
-              >
-                <Play className="mr-2" size={24} />
-                เริ่มเกม!
-              </Button>
-            </motion.div>
-          )}
         </motion.div>
 
-        {/* Info text */}
+        {/* Status Text */}
         <motion.p
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ delay: 0.6 }}
           className="text-center text-xs text-muted-foreground mt-6"
         >
-          {needMorePlayers 
-            ? `รอผู้เล่นอีก ${TARGET_PLAYERS - players.length} คน หรือโหวตเพื่อเริ่มก่อน`
-            : allReady 
-              ? 'ทุกคนพร้อมแล้ว! กดเริ่มเกมเลย'
-              : 'รอให้ทุกคนกดพร้อม'
+          {totalPlayers < 2 
+            ? 'รอผู้เล่นอย่างน้อย 2 คนเพื่อเริ่มเกม'
+            : allVoted
+              ? 'ทุกคนโหวตแล้ว! กำลังเริ่มสุ่ม...'
+              : `รออีก ${totalPlayers - voteCount} คนโหวต`
           }
         </motion.p>
       </div>
