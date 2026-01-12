@@ -185,21 +185,29 @@ export const useGameSession = () => {
 
       const roles = assignRoles(freshPlayers.length);
       
+      // 1. อัปเดตบทบาทแบบ Batch
       const roleUpdates = freshPlayers.map((p, i) => 
         supabase.from('players').update({ assigned_role: roles[i] }).eq('id', p.id)
       );
       await Promise.all(roleUpdates);
 
+      // 2. เปลี่ยนสถานะห้อง
+      const startTime = new Date().toISOString();
       const { error: sessionError } = await supabase
         .from('game_sessions')
         .update({ 
           status: 'playing', 
-          started_at: new Date().toISOString() 
+          started_at: startTime 
         })
         .eq('id', session.id)
         .eq('status', 'lobby');
 
       if (sessionError) throw sessionError;
+
+      // --- ส่วนที่แก้ไข: อัปเดตสถานะในเครื่องตัวเองทันทีเพื่อให้ UI เปลี่ยนหน้า ---
+      setSession(prev => prev ? { ...prev, status: 'playing', started_at: startTime } : null);
+      setPlayers(prev => prev.map((p, i) => ({ ...p, assigned_role: roles[i] })));
+      // ---------------------------------------------------------------------
 
       soundManager.playGameStart();
     } catch (err) {
@@ -231,7 +239,10 @@ export const useGameSession = () => {
 
     const channel = supabase.channel(`game-${session.id}`)
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'game_sessions', filter: `id=eq.${session.id}` }, 
-        (payload) => setSession(payload.new as GameSession)
+        (payload) => {
+          // อัปเดตสถานะเมื่อมีการเปลี่ยนแปลงใน DB
+          setSession(payload.new as GameSession);
+        }
       )
       .on('postgres_changes', { event: '*', schema: 'public', table: 'players', filter: `session_id=eq.${session.id}` }, 
         async () => {
@@ -254,15 +265,13 @@ export const useGameSession = () => {
 
     if (session?.status === 'lobby' && allVoted && players.length >= 2) {
       if (countdown === null) {
-        // เริ่มต้นนับถอยหลังที่ 5
         setCountdown(5);
       } else if (countdown > 0) {
-        // ลดเวลาลงทุก 1 วินาที
         timer = setTimeout(() => {
           setCountdown(countdown - 1);
         }, 1000);
       } else if (countdown === 0) {
-        // เมื่อถึง 0 ให้ Host สั่งเริ่มเกม
+        // ใช้ player_order ที่คงที่ในการเลือก Host
         const sorted = [...players].sort((a, b) => a.player_order - b.player_order);
         const isHost = sorted[0]?.id === currentPlayer?.id;
 
@@ -271,7 +280,6 @@ export const useGameSession = () => {
         }
       }
     } else {
-      // หากเงื่อนไขไม่ครบ (เช่น มีคนออกระหว่างนับ) ให้รีเซ็ต countdown
       if (countdown !== null) setCountdown(null);
     }
 
