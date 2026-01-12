@@ -32,7 +32,6 @@ export const useGameSession = () => {
   const [hasJoined, setHasJoined] = useState(false);
   const [error, setError] = useState<string | null>(null);
   
-  // ใช้ useRef เพื่อป้องกันการรันฟังก์ชันซ้ำซ้อนในเครื่องเดียวกัน
   const isStartingRef = useRef(false);
 
   const getPlayerId = useCallback(() => {
@@ -44,7 +43,6 @@ export const useGameSession = () => {
     return playerId;
   }, []);
 
-  // ดึงรายชื่อผู้เล่นและกรองคนที่ไม่แอคทีฟออก
   const fetchAllPlayers = useCallback(async (sessionId: string) => {
     const { data, error: fetchError } = await supabase
       .from('players')
@@ -86,10 +84,17 @@ export const useGameSession = () => {
   }, [getPlayerId, fetchAllPlayers]);
 
   const joinGame = useCallback(async (playerName: string) => {
+    if (!playerName.trim()) return;
+
     try {
       setIsJoining(true);
+      setError(null);
       const playerId = getPlayerId();
 
+      // 1. ลบข้อมูลเก่าที่อาจค้างอยู่ใน DB เพื่อป้องกัน Primary Key Error
+      await supabase.from('players').delete().eq('id', playerId);
+
+      // 2. ค้นหาหรือสร้าง Session
       let { data: existingSession } = await supabase
         .from('game_sessions')
         .select('*')
@@ -110,17 +115,19 @@ export const useGameSession = () => {
 
       setSession(existingSession as GameSession);
 
+      // 3. นับจำนวนเพื่อเรียงลำดับ
       const { count } = await supabase
         .from('players')
         .select('*', { count: 'exact', head: true })
         .eq('session_id', existingSession.id);
 
+      // 4. สร้างผู้เล่นใหม่
       const { data: newPlayer, error: playerError } = await supabase
         .from('players')
         .insert({
           id: playerId,
           session_id: existingSession.id,
-          player_name: playerName,
+          player_name: playerName.trim(),
           player_order: (count || 0) + 1,
           is_ready: false,
           voted_to_start: false,
@@ -129,12 +136,14 @@ export const useGameSession = () => {
         .single();
 
       if (playerError) throw playerError;
+
       setCurrentPlayer(newPlayer as Player);
       setHasJoined(true);
       await fetchAllPlayers(existingSession.id);
-      setIsJoining(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'เกิดข้อผิดพลาด');
+      console.error("Join error:", err);
+      setError(err instanceof Error ? err.message : 'ไม่สามารถเข้าร่วมเกมได้');
+    } finally {
       setIsJoining(false);
     }
   }, [getPlayerId, fetchAllPlayers]);
@@ -162,7 +171,6 @@ export const useGameSession = () => {
     }
   }, [currentPlayer]);
 
-  // ฟังก์ชันเริ่มเกมที่ปลอดภัยที่สุด (ทำงานเฉพาะ Host)
   const startGame = useCallback(async () => {
     if (!session || players.length < 2 || isStartingRef.current) return;
     
@@ -170,7 +178,6 @@ export const useGameSession = () => {
     setIsLoading(true);
 
     try {
-      // 1. ดึงข้อมูลล่าสุดเพื่อความแม่นยำ
       const { data: freshPlayers } = await supabase
         .from('players')
         .select('*')
@@ -181,13 +188,11 @@ export const useGameSession = () => {
 
       const roles = assignRoles(freshPlayers.length);
       
-      // 2. อัปเดตบทบาทแบบขนาน (Parallel)
       const roleUpdates = freshPlayers.map((p, i) => 
         supabase.from('players').update({ assigned_role: roles[i] }).eq('id', p.id)
       );
       await Promise.all(roleUpdates);
 
-      // 3. เปลี่ยนสถานะห้อง (Atomic Update)
       const { error: sessionError } = await supabase
         .from('game_sessions')
         .update({ 
@@ -195,7 +200,7 @@ export const useGameSession = () => {
           started_at: new Date().toISOString() 
         })
         .eq('id', session.id)
-        .eq('status', 'lobby'); // มั่นใจว่าจะสำเร็จแค่เครื่องเดียว
+        .eq('status', 'lobby');
 
       if (sessionError) throw sessionError;
 
@@ -215,7 +220,6 @@ export const useGameSession = () => {
     isStartingRef.current = false;
   }, [session]);
 
-  // Heartbeat เพื่อบอกว่าเรายังออนไลน์อยู่
   useEffect(() => {
     if (!currentPlayer) return;
     const interval = setInterval(() => {
@@ -224,7 +228,6 @@ export const useGameSession = () => {
     return () => clearInterval(interval);
   }, [currentPlayer]);
 
-  // ระบบ Real-time สำหรับสถานะห้องและรายชื่อผู้เล่น
   useEffect(() => {
     if (!session) return;
 
@@ -247,14 +250,12 @@ export const useGameSession = () => {
   const voteThreshold = Math.ceil(players.length * 0.5);
   const canStartWithVote = voteCount >= voteThreshold && players.length >= 2;
 
-  // --- ระบบตรวจจับการโหวตเพื่อเริ่มเกมอัตโนมัติ ---
   useEffect(() => {
     if (session?.status === 'lobby' && allVoted && players.length >= 2) {
-      // คัดเลือกคนที่เป็น Host (คนแรกในลิสต์ที่เรียงลำดับแล้ว)
-      const isHost = players[0]?.id === currentPlayer?.id;
+      const sorted = [...players].sort((a, b) => a.player_order - b.player_order);
+      const isHost = sorted[0]?.id === currentPlayer?.id;
 
       if (isHost && !isStartingRef.current && !isLoading) {
-        console.log("คุณคือหัวห้อง ระบบกำลังเริ่มสุ่มบทบาทให้ทุกคน...");
         startGame();
       }
     }
