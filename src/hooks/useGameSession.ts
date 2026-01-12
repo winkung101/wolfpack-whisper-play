@@ -27,23 +27,59 @@ export const useGameSession = () => {
   const [session, setSession] = useState<GameSession | null>(null);
   const [players, setPlayers] = useState<Player[]>([]);
   const [currentPlayer, setCurrentPlayer] = useState<Player | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isJoining, setIsJoining] = useState(false);
+  const [hasJoined, setHasJoined] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // Generate a unique player ID for this browser session
   const getPlayerId = useCallback(() => {
-    let playerId = sessionStorage.getItem('werewolf_player_id');
+    let playerId = localStorage.getItem('werewolf_player_id');
     if (!playerId) {
       playerId = crypto.randomUUID();
-      sessionStorage.setItem('werewolf_player_id', playerId);
+      localStorage.setItem('werewolf_player_id', playerId);
     }
     return playerId;
   }, []);
 
-  // Initialize or join session
-  const initializeSession = useCallback(async () => {
+  // Check if player already joined
+  const checkExistingPlayer = useCallback(async () => {
+    const playerId = getPlayerId();
+    
+    // Check if player exists in any active session
+    const { data: existingPlayer } = await supabase
+      .from('players')
+      .select('*, game_sessions!inner(*)')
+      .eq('id', playerId)
+      .eq('game_sessions.status', 'lobby')
+      .maybeSingle();
+
+    if (existingPlayer) {
+      setCurrentPlayer(existingPlayer as Player);
+      setSession(existingPlayer.game_sessions as GameSession);
+      setHasJoined(true);
+
+      // Update last_seen
+      await supabase
+        .from('players')
+        .update({ last_seen: new Date().toISOString() })
+        .eq('id', playerId);
+
+      // Fetch all players
+      const { data: allPlayers } = await supabase
+        .from('players')
+        .select('*')
+        .eq('session_id', existingPlayer.session_id)
+        .order('player_order', { ascending: true });
+
+      setPlayers((allPlayers || []) as Player[]);
+    }
+  }, [getPlayerId]);
+
+  // Join game with name
+  const joinGame = useCallback(async (playerName: string) => {
     try {
-      setIsLoading(true);
+      setIsJoining(true);
       const playerId = getPlayerId();
 
       // Find or create an active lobby session
@@ -53,7 +89,7 @@ export const useGameSession = () => {
         .eq('status', 'lobby')
         .order('created_at', { ascending: false })
         .limit(1)
-        .single();
+        .maybeSingle();
 
       if (!existingSession) {
         // Create new session
@@ -69,49 +105,31 @@ export const useGameSession = () => {
 
       setSession(existingSession as GameSession);
 
-      // Check if player already exists in this session
-      const { data: existingPlayer } = await supabase
+      // Get current player count for ordering
+      const { count } = await supabase
         .from('players')
-        .select('*')
-        .eq('session_id', existingSession.id)
-        .eq('id', playerId)
+        .select('*', { count: 'exact', head: true })
+        .eq('session_id', existingSession.id);
+
+      const playerOrder = (count || 0) + 1;
+
+      // Create new player
+      const { data: newPlayer, error: playerError } = await supabase
+        .from('players')
+        .insert({
+          id: playerId,
+          session_id: existingSession.id,
+          player_name: playerName,
+          player_order: playerOrder,
+          is_ready: false,
+          voted_to_start: false,
+        })
+        .select()
         .single();
 
-      if (existingPlayer) {
-        // Update last_seen
-        await supabase
-          .from('players')
-          .update({ last_seen: new Date().toISOString() })
-          .eq('id', playerId);
-        setCurrentPlayer(existingPlayer as Player);
-      } else {
-        // Get current player count for naming
-        const { count } = await supabase
-          .from('players')
-          .select('*', { count: 'exact', head: true })
-          .eq('session_id', existingSession.id);
-
-        const playerOrder = (count || 0) + 1;
-        const playerName = `ผู้เล่น ${playerOrder}`;
-
-        // Create new player
-        const { data: newPlayer, error: playerError } = await supabase
-          .from('players')
-          .insert({
-            id: playerId,
-            session_id: existingSession.id,
-            player_name: playerName,
-            player_order: playerOrder,
-            is_ready: false,
-            voted_to_start: false,
-          })
-          .select()
-          .single();
-
-        if (playerError) throw playerError;
-        setCurrentPlayer(newPlayer as Player);
-        soundManager.playJoin();
-      }
+      if (playerError) throw playerError;
+      setCurrentPlayer(newPlayer as Player);
+      setHasJoined(true);
 
       // Fetch all players
       const { data: allPlayers } = await supabase
@@ -121,12 +139,17 @@ export const useGameSession = () => {
         .order('player_order', { ascending: true });
 
       setPlayers((allPlayers || []) as Player[]);
-      setIsLoading(false);
+      setIsJoining(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'เกิดข้อผิดพลาด');
-      setIsLoading(false);
+      setIsJoining(false);
     }
   }, [getPlayerId]);
+
+  // Check on mount
+  useEffect(() => {
+    checkExistingPlayer();
+  }, [checkExistingPlayer]);
 
   // Toggle ready status
   const toggleReady = useCallback(async () => {
@@ -286,10 +309,6 @@ export const useGameSession = () => {
     };
   }, [session, currentPlayer?.id]);
 
-  // Initialize on mount
-  useEffect(() => {
-    initializeSession();
-  }, [initializeSession]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -315,18 +334,23 @@ export const useGameSession = () => {
   const voteCount = activePlayers.filter(p => p.voted_to_start).length;
   const voteThreshold = Math.ceil(activePlayers.length * 0.5);
   const canStartWithVote = voteCount >= voteThreshold && activePlayers.length >= 2;
+  const allVoted = activePlayers.length >= 2 && activePlayers.every(p => p.voted_to_start);
 
   return {
     session,
     players: activePlayers,
     currentPlayer,
     isLoading,
+    isJoining,
+    hasJoined,
     error,
+    joinGame,
     toggleReady,
     voteToStart,
     startGame,
     resetGame,
     allReady,
+    allVoted,
     voteCount,
     voteThreshold,
     canStartWithVote,
